@@ -20,16 +20,19 @@ from src.backtest.portfolio import (
 )
 from src.backtest.report import export_backtest_report, export_fm_report
 from src.backtest.sorts import assign_sorts, filter_eligible, lag_signal, rebalance_dates
+from src.backtest.tearsheet import TearsheetResult, build_tearsheet
 from src.backtest.turnover import average_turnover, compute_turnover
 
 __all__ = [
     "BacktestConfig",
     "BacktestResult",
     "FMResult",
+    "TearsheetResult",
     "annualized_sharpe",
     "assert_dollar_neutral",
     "assign_sorts",
     "average_turnover",
+    "build_tearsheet",
     "compute_turnover",
     "export_backtest_report",
     "export_fm_report",

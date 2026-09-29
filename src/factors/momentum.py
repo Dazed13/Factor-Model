@@ -81,14 +81,17 @@ def construct_wml(
         mid_label="N",
         high_label="W",
     )
+    use_value = (
+        weight_col in work.columns and work[weight_col].null_count() < work.height
+    )
     return long_short_returns(
         work,
         long_mask=pl.col("mom_bucket") == "W",
         short_mask=pl.col("mom_bucket") == "L",
         date_col=date_col,
         ret_col=ret_col,
-        weight_col=weight_col if weight_col in work.columns else None,
-        weighting="value" if weight_col in work.columns else "equal",
+        weight_col=weight_col if use_value else None,
+        weighting="value" if use_value else "equal",
         factor_name="WML",
     )
 
@@ -111,14 +114,17 @@ def construct_illiq_factor(
         mid_label="N",
         high_label="ILLIQ",
     )
+    use_value = (
+        weight_col in work.columns and work[weight_col].null_count() < work.height
+    )
     return long_short_returns(
         work,
         long_mask=pl.col("illiq_bucket") == "ILLIQ",
         short_mask=pl.col("illiq_bucket") == "LIQ",
         date_col=date_col,
         ret_col=ret_col,
-        weight_col=weight_col if weight_col in work.columns else None,
-        weighting="value" if weight_col in work.columns else "equal",
+        weight_col=weight_col if use_value else None,
+        weighting="value" if use_value else "equal",
         factor_name="ILLIQ",
     )
 

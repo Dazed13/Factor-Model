@@ -82,23 +82,51 @@ def point_in_time_fundamentals(
     )
 
 
+def _silence_yfinance_logs() -> None:
+    """Yahoo crumb/SSL warnings are extremely noisy and usually non-fatal."""
+    for name in ("yfinance", "peewee", "urllib3", "curl_cffi"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+
+
+def _fast_info_get(fi: object, *keys: str) -> object | None:
+    for key in keys:
+        try:
+            if hasattr(fi, "get"):
+                val = fi.get(key)  # type: ignore[call-arg]
+            else:
+                val = getattr(fi, key, None)
+            if val is not None:
+                return val
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def fetch_yfinance_fundamentals(
     symbols: Iterable[str],
     *,
     as_of: date | None = None,
     lag_months: int = 3,
     symbol_map: SymbolMap | None = None,
+    pause_s: float = 0.05,
 ) -> pl.DataFrame:
-    """Pull marketCap / bookValue from yfinance ``Ticker.info`` (snapshot).
+    """Pull market cap (and BTM when available) via yfinance ``fast_info``.
+
+    Prefers ``fast_info`` over ``info`` because crumb/SSL failures often make
+    ``Ticker.info`` return empty/401 while quote ``fast_info`` still works.
 
     This is a *current* snapshot helper for scaffolding and smoke tests.
     Production research should replace or enrich with historical filings
-    (quarterly balance sheets) stored under ``data/raw/fundamentals/``.
+    stored under ``data/raw/fundamentals/``.
     """
+    import time
+
     try:
         import yfinance as yf
     except ImportError as exc:  # pragma: no cover
         raise ImportError("yfinance is required for fetch_yfinance_fundamentals") from exc
+
+    _silence_yfinance_logs()
 
     sm = symbol_map or SymbolMap()
     as_of = as_of or date.today()
@@ -106,38 +134,45 @@ def fetch_yfinance_fundamentals(
     yf_syms = to_yfinance_symbols(bare, sm)
 
     rows: list[dict[str, object]] = []
-    for bare_sym, yf_sym in zip(bare, yf_syms):
+    n_ok = 0
+    n_fail = 0
+    total = len(bare)
+    for i, (bare_sym, yf_sym) in enumerate(zip(bare, yf_syms), start=1):
+        mcap: float | None = None
+        book: float | None = None
+        btm: float | None = None
         try:
-            info = yf.Ticker(yf_sym).info or {}
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("yfinance info failed for %s: %s", yf_sym, exc)
-            continue
-        mcap = info.get("marketCap")
-        book = info.get("bookValue")
-        # bookValue from Yahoo is often per-share; prefer book_to_market from
-        # priceBook if present, else bookValue / (marketCap/shares) approximation.
-        pb = info.get("priceToBook")
-        if pb and pb > 0:
-            btm = 1.0 / float(pb)
-        elif mcap and book and mcap > 0:
-            # Heuristic: treat bookValue as per-share and scale by sharesOutstanding
-            shares = info.get("sharesOutstanding")
-            if shares:
-                btm = (float(book) * float(shares)) / float(mcap)
-            else:
-                btm = None
-        else:
-            btm = None
-        rows.append(
-            {
-                "as_of_date": as_of,
-                "symbol": bare_sym,
-                "market_cap": float(mcap) if mcap is not None else None,
-                "book_value": float(book) if book is not None else None,
-                "book_to_market": float(btm) if btm is not None else None,
-            }
-        )
+            # Prefer fast_info — avoids Yahoo crumb/info endpoints that 401.
+            fi = yf.Ticker(yf_sym).fast_info
+            mcap_raw = _fast_info_get(fi, "marketCap", "market_cap")
+            if mcap_raw is not None:
+                mcap = float(mcap_raw)
 
+            # BTM is rarely on fast_info; leave null in snapshot mode.
+            # Use --mode quarterly (or a vendor CSV) for book equity / HML.
+            if mcap is None:
+                n_fail += 1
+            else:
+                n_ok += 1
+                rows.append(
+                    {
+                        "as_of_date": as_of,
+                        "symbol": bare_sym,
+                        "market_cap": mcap,
+                        "book_value": book,
+                        "book_to_market": btm,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            n_fail += 1
+            logger.warning("yfinance snapshot failed for %s: %s", yf_sym, exc)
+
+        if i % 25 == 0 or i == total:
+            logger.info("Fundamentals progress: %d/%d (ok=%d fail=%d)", i, total, n_ok, n_fail)
+        if pause_s > 0:
+            time.sleep(pause_s)
+
+    logger.info("Snapshot fundamentals done: ok=%d fail=%d", n_ok, n_fail)
     if not rows:
         return pl.DataFrame(schema={c: pl.Utf8 for c in FUNDAMENTAL_COLUMNS}).clear()
 
@@ -169,6 +204,10 @@ def load_fundamentals_csv(
     for col in ("market_cap", "book_value", "book_to_market"):
         if col not in df.columns:
             df = df.with_columns(pl.lit(None).cast(pl.Float64).alias(col))
+        else:
+            df = df.with_columns(
+                pl.col(col).cast(pl.Float64, strict=False).alias(col)
+            )
     if (
         df.get_column("book_to_market").null_count() == df.height
         and "book_value" in df.columns
@@ -189,3 +228,185 @@ def save_fundamentals(df: pl.DataFrame, name: str = "fundamentals") -> Path:
     out = PROCESSED_FUNDAMENTALS_DIR / f"{name}.parquet"
     df.write_parquet(out, compression="snappy")
     return out
+
+
+def _resolve_shares(ticker: object, info: dict) -> float | None:
+    """Best-effort shares outstanding from info or share-count history."""
+    shares = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+    if shares:
+        try:
+            return float(shares)
+        except (TypeError, ValueError):
+            pass
+    try:
+        hist_shares = ticker.get_shares_full(start="2015-01-01")
+        if hist_shares is not None and len(hist_shares) > 0:
+            return float(hist_shares.dropna().iloc[-1])
+    except Exception:  # noqa: BLE001
+        pass
+    # Derive from marketCap / last price when possible
+    mcap = info.get("marketCap")
+    price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+    try:
+        if mcap and price and float(price) > 0:
+            return float(mcap) / float(price)
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    return None
+
+
+def _pick_equity_row(bs: object) -> object | None:
+    """Find a book-equity-like row in a yfinance balance-sheet DataFrame."""
+    if bs is None or getattr(bs, "empty", True):
+        return None
+    equity_keys = (
+        "Stockholders Equity",
+        "Total Stockholder Equity",
+        "Common Stock Equity",
+        "Total Equity Gross Minority Interest",
+        "StockholdersEquity",
+        "CommonStockEquity",
+        "TotalEquityGrossMinorityInterest",
+    )
+    index_map = {str(i): i for i in bs.index}
+    lower_map = {str(i).lower().replace(" ", ""): i for i in bs.index}
+    for key in equity_keys:
+        if key in index_map:
+            return bs.loc[index_map[key]]
+        compact = key.lower().replace(" ", "")
+        if compact in lower_map:
+            return bs.loc[lower_map[compact]]
+    # Fuzzy: any index containing both 'stockholder' and 'equity'
+    for i in bs.index:
+        s = str(i).lower()
+        if "equity" in s and ("stockholder" in s or "shareholder" in s or "common stock" in s):
+            return bs.loc[i]
+    return None
+
+
+def fetch_yfinance_quarterly_fundamentals(
+    symbols: Iterable[str],
+    *,
+    lag_months: int = 3,
+    symbol_map: SymbolMap | None = None,
+    max_symbols: int | None = None,
+) -> pl.DataFrame:
+    """Build a quarterly ME / BTM panel from yfinance filings + price history.
+
+    Method (good enough for pipeline smoke tests; not CMIE-grade PIT):
+      * Book equity from quarterly (else annual) balance sheet.
+      * Market cap ≈ filing-date close × shares outstanding (best-effort).
+
+    Prefer a vendor fundamentals file for production research.
+    """
+    try:
+        import yfinance as yf
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("yfinance is required for fetch_yfinance_quarterly_fundamentals") from exc
+
+    _silence_yfinance_logs()
+
+    sm = symbol_map or SymbolMap()
+    bare = [sm.normalize_nse(s) for s in symbols]
+    if max_symbols is not None:
+        bare = bare[: max_symbols]
+    yf_syms = to_yfinance_symbols(bare, sm)
+
+    rows: list[dict[str, object]] = []
+    n_ok = 0
+    n_fail = 0
+    for bare_sym, yf_sym in zip(bare, yf_syms):
+        try:
+            t = yf.Ticker(yf_sym)
+            # Prefer fast_info; .info often 401s on crumb/SSL issues
+            try:
+                fi = t.fast_info
+                info = {
+                    "marketCap": _fast_info_get(fi, "marketCap", "market_cap"),
+                    "currentPrice": _fast_info_get(
+                        fi, "lastPrice", "last_price", "regularMarketPrice"
+                    ),
+                    "sharesOutstanding": _fast_info_get(fi, "shares", "sharesOutstanding"),
+                }
+            except Exception:  # noqa: BLE001
+                info = {}
+            shares = _resolve_shares(t, info)
+            bs = t.quarterly_balance_sheet
+            book_row = _pick_equity_row(bs)
+            if book_row is None:
+                book_row = _pick_equity_row(getattr(t, "balance_sheet", None))
+            hist = t.history(period="max", auto_adjust=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("quarterly fundamentals failed for %s: %s", yf_sym, exc)
+            n_fail += 1
+            continue
+
+        if book_row is None or shares is None:
+            logger.warning(
+                "Insufficient quarterly data for %s (book=%s shares=%s)",
+                yf_sym,
+                book_row is not None,
+                shares,
+            )
+            n_fail += 1
+            continue
+
+        if hist is None or getattr(hist, "empty", True):
+            n_fail += 1
+            continue
+
+        hist = hist.copy()
+        if getattr(hist.index, "tz", None) is not None:
+            hist.index = hist.index.tz_localize(None)
+
+        wrote = 0
+        for as_of_ts, book_val in book_row.items():
+            try:
+                as_of = (
+                    as_of_ts.date()
+                    if hasattr(as_of_ts, "date")
+                    else date.fromisoformat(str(as_of_ts)[:10])
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                book = float(book_val)
+            except (TypeError, ValueError):
+                continue
+            if book != book:  # NaN
+                continue
+            px = hist.loc[: str(as_of)]
+            if px.empty:
+                continue
+            close = float(px["Close"].iloc[-1])
+            if close <= 0:
+                continue
+            mcap = close * float(shares)
+            btm = book / mcap if mcap > 0 else None
+            rows.append(
+                {
+                    "as_of_date": as_of,
+                    "symbol": bare_sym,
+                    "market_cap": mcap,
+                    "book_value": book,
+                    "book_to_market": btm,
+                }
+            )
+            wrote += 1
+
+        if wrote:
+            n_ok += 1
+        else:
+            n_fail += 1
+
+    logger.info("Quarterly fundamentals: %d symbols ok, %d failed", n_ok, n_fail)
+    if not rows:
+        return pl.DataFrame(schema={c: pl.Utf8 for c in FUNDAMENTAL_COLUMNS}).clear()
+
+    df = (
+        pl.DataFrame(rows)
+        .unique(subset=["as_of_date", "symbol"])
+        .sort(["symbol", "as_of_date"])
+    )
+    df = apply_reporting_lag(df, lag_months=lag_months)
+    return df.select(FUNDAMENTAL_COLUMNS)

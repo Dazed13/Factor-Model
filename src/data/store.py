@@ -35,6 +35,9 @@ def parquet_glob(dataset_dir: Path, partition_by: PartitionBy | None = None) -> 
         return str(dataset_dir / "year=*" / "*.parquet")
     if partition_by == "symbol":
         return str(dataset_dir / "symbol=*" / "*.parquet")
+    # Flat or mixed layout
+    if any(dataset_dir.glob("*.parquet")):
+        return str(dataset_dir / "*.parquet")
     return str(dataset_dir / "**" / "*.parquet")
 
 
@@ -188,14 +191,21 @@ def register_standard_views(
         has_parquet = any(path.rglob("*.parquet"))
         if not has_parquet:
             continue
-        register_parquet_view(
-            con,
-            name,
-            path,
-            partition_by=part,  # type: ignore[arg-type]
-            hive_partitioning=part is not None,
-        )
-        registered.append(name)
+        # Prefer hive year= partitions when present; else flat *.parquet
+        use_part = part
+        if part == "year" and not any(path.glob("year=*")):
+            use_part = None
+        try:
+            register_parquet_view(
+                con,
+                name,
+                path,
+                partition_by=use_part,  # type: ignore[arg-type]
+                hive_partitioning=use_part is not None,
+            )
+            registered.append(name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skipping DuckDB view %s (%s): %s", name, path, exc)
     return registered
 
 

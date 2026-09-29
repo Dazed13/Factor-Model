@@ -77,6 +77,9 @@ def attach_yfinance_adjustments(
     except ImportError as exc:  # pragma: no cover
         raise ImportError("yfinance is required for attach_yfinance_adjustments") from exc
 
+    for name in ("yfinance", "peewee", "urllib3", "curl_cffi"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+
     sm = symbol_map or SymbolMap()
     syms = symbols or bhav.get_column("symbol").unique().to_list()
     yf_tickers = to_yfinance_symbols(syms, sm)

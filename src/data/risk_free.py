@@ -102,7 +102,8 @@ def load_risk_free_csv(
     Accepts column aliases: ``date``/``Date``, and
     ``annualized_yield`` / ``yield`` / ``ytm`` / ``rate``.
     """
-    df = pl.read_csv(path, try_parse_dates=True)
+    # RBI exports sometimes mark missing auctions as "-".
+    df = pl.read_csv(path, try_parse_dates=True, null_values=["-"])
     lower = {c.lower().strip(): c for c in df.columns}
 
     date_aliases = (date_col.lower(), "date", "trade_date", "auction_date")
@@ -194,3 +195,42 @@ def example_rbi_tbill_template(path: Path | None = None) -> Path:
         }
     ).write_csv(path)
     return path
+
+
+def import_risk_free_file(
+    path: str | Path,
+    *,
+    source: RfSource = "rbi_91d_tbill",
+    dest_name: str = "risk_free",
+) -> Path:
+    """Normalize a user CSV/Parquet and write processed snappy Parquet + raw copy."""
+    ensure_data_dirs()
+    path = Path(path)
+    if path.suffix.lower() == ".parquet":
+        df = pl.read_parquet(path)
+        if "daily_rf" not in df.columns:
+            raise ValueError("Parquet risk-free file must already include daily_rf")
+    else:
+        df = load_risk_free_csv(path, source=source)
+        # Keep a raw copy for audit
+        raw_out = RAW_RISK_FREE_DIR / f"{dest_name}.csv"
+        df.select(["date", "annualized_yield"]).write_csv(raw_out)
+    return save_risk_free(df, name=dest_name)
+
+
+def import_risk_free_url(
+    url: str,
+    *,
+    source: RfSource = "rbi_91d_tbill",
+    dest_name: str = "risk_free",
+    timeout: float = 60.0,
+) -> Path:
+    """Download a CSV from ``url`` and import via :func:`import_risk_free_file`."""
+    import requests
+
+    ensure_data_dirs()
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    raw_path = RAW_RISK_FREE_DIR / f"{dest_name}_download.csv"
+    raw_path.write_bytes(resp.content)
+    return import_risk_free_file(raw_path, source=source, dest_name=dest_name)

@@ -139,10 +139,12 @@ class TestRiskFree:
 
     def test_load_csv(self, tmp_path: Path) -> None:
         path = tmp_path / "rf.csv"
-        path.write_text("date,yield\n2024-01-05,6.75\n")
+        path.write_text("date,yield\n2024-01-05,6.75\n2024-01-12,-\n")
         df = load_risk_free_csv(path)
-        assert df.height == 1
+        assert df.height == 2
         assert df["daily_rf"][0] == pytest.approx(0.0675 / 365)
+        assert df["annualized_yield"][1] is None
+        assert df["daily_rf"][1] is None
 
 
 class TestCorporateActions:

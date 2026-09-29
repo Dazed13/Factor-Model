@@ -33,6 +33,14 @@ class FactorBuildResult:
     factor_paths: list[Path] = field(default_factory=list)
 
 
+def _has_signal(df: pl.DataFrame, *cols: str) -> bool:
+    """True if any named column exists with at least one non-null value."""
+    for c in cols:
+        if c in df.columns and df[c].null_count() < df.height:
+            return True
+    return False
+
+
 def build_characteristic_panel(
     returns: pl.DataFrame,
     *,
@@ -43,16 +51,20 @@ def build_characteristic_panel(
     panel = returns
     panel = build_amihud_characteristic(panel, window=amihud_window)
 
-    if "market_cap" in panel.columns or "me" in panel.columns:
+    if _has_signal(panel, "market_cap", "me"):
         panel = attach_size_characteristic(panel)
         sig_col = "log_me" if "log_me" in panel.columns else "me"
         if winsorize:
             panel = prepare_signal(panel, sig_col, winsor=True, zscore=True)
+    else:
+        logger.info("Skipping Size characteristic — no non-null market_cap/me")
 
-    if "book_to_market" in panel.columns or "btm" in panel.columns:
+    if _has_signal(panel, "book_to_market", "btm"):
         panel = attach_value_characteristic(panel)
         if winsorize:
             panel = prepare_signal(panel, "btm", winsor=True, zscore=True)
+    else:
+        logger.info("Skipping Value characteristic — no non-null book_to_market/btm")
 
     panel = attach_momentum_characteristic(panel)
     if winsorize:
@@ -67,21 +79,21 @@ def build_factor_returns(characteristics: pl.DataFrame) -> pl.DataFrame:
     """Construct SMB, HML, WML, ILLIQ daily factor return series."""
     frames: list[pl.DataFrame] = []
 
-    if "me" in characteristics.columns or "market_cap" in characteristics.columns:
-        smb = construct_smb(characteristics)
-        frames.append(smb)
+    if _has_signal(characteristics, "me", "market_cap"):
+        frames.append(construct_smb(characteristics))
+    else:
+        logger.info("Skipping SMB — no non-null size signal")
 
-    if "btm" in characteristics.columns or "book_to_market" in characteristics.columns:
-        hml = construct_hml(characteristics)
-        frames.append(hml)
+    if _has_signal(characteristics, "btm", "book_to_market"):
+        frames.append(construct_hml(characteristics))
+    else:
+        logger.info("Skipping HML — no non-null value signal")
 
     if "mom_12_1" in characteristics.columns:
-        wml = construct_wml(characteristics)
-        frames.append(wml)
+        frames.append(construct_wml(characteristics))
 
     if "illiq_signal" in characteristics.columns:
-        illiq = construct_illiq_factor(characteristics)
-        frames.append(illiq)
+        frames.append(construct_illiq_factor(characteristics))
 
     if not frames:
         return pl.DataFrame({"trade_date": pl.Series([], dtype=pl.Date)})
