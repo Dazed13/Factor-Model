@@ -17,6 +17,10 @@ from urllib.parse import urlencode
 logger = logging.getLogger(__name__)
 
 _warned_insecure = False
+_DEFAULT_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 def _verify_setting() -> bool | str:
@@ -32,29 +36,31 @@ def _verify_setting() -> bool | str:
         return True
 
 
-def http_get_json(
+def http_get_text(
     url: str,
     *,
     params: Mapping[str, Any] | None = None,
     timeout: float = 45.0,
     headers: Mapping[str, str] | None = None,
-) -> Any:
-    """GET JSON from ``url`` with SSL fallbacks suitable for vendor APIs."""
+    accept: str = "text/html,application/xhtml+xml",
+) -> str:
+    """GET text/HTML from ``url`` with the same SSL fallbacks as JSON helpers."""
     global _warned_insecure
     params = dict(params or {})
-    headers = dict(headers or {})
+    hdrs = {"Accept": accept, "User-Agent": _DEFAULT_UA}
+    if headers:
+        hdrs.update(headers)
     verify = _verify_setting()
 
     try:
         import requests
 
-        resp = requests.get(url, params=params, headers=headers, timeout=timeout, verify=verify)
+        resp = requests.get(url, params=params, headers=hdrs, timeout=timeout, verify=verify)
         resp.raise_for_status()
-        return resp.json()
+        return resp.text
     except Exception as exc:  # noqa: BLE001
-        logger.debug("requests GET failed (%s); trying curl", exc)
+        logger.debug("requests GET text failed (%s); trying curl", exc)
 
-    # System curl (SecureTransport on macOS) often works when OpenSSL does not.
     full = url if not params else f"{url}?{urlencode(params)}"
     curl_cmd = [
         "curl",
@@ -62,23 +68,26 @@ def http_get_json(
         "-L",
         "--fail-with-body",
         "-H",
-        "Accept: application/json",
+        f"Accept: {accept}",
+        "-H",
+        f"User-Agent: {_DEFAULT_UA}",
         "--max-time",
         str(int(timeout)),
         full,
     ]
-    for k, v in headers.items():
+    for k, v in hdrs.items():
+        if k.lower() in {"accept", "user-agent"}:
+            continue
         curl_cmd[5:5] = ["-H", f"{k}: {v}"]
     try:
         proc = subprocess.run(curl_cmd, capture_output=True, text=True, check=False)
         if proc.returncode == 0 and proc.stdout:
-            return json.loads(proc.stdout)
+            return proc.stdout
         err = (proc.stderr or proc.stdout or "")[:300]
-        logger.debug("curl GET failed rc=%s: %s", proc.returncode, err)
+        logger.debug("curl GET text failed rc=%s: %s", proc.returncode, err)
     except Exception as exc:  # noqa: BLE001
         logger.debug("curl subprocess failed: %s", exc)
 
-    # Last resort: insecure requests (corporate MITM / broken CA chain).
     if verify is not False:
         if not _warned_insecure:
             logger.warning(
@@ -88,8 +97,26 @@ def http_get_json(
             _warned_insecure = True
         import requests
 
-        resp = requests.get(url, params=params, headers=headers, timeout=timeout, verify=False)
+        resp = requests.get(url, params=params, headers=hdrs, timeout=timeout, verify=False)
         resp.raise_for_status()
-        return resp.json()
+        return resp.text
 
     raise RuntimeError(f"HTTP GET failed for {url}")
+
+
+def http_get_json(
+    url: str,
+    *,
+    params: Mapping[str, Any] | None = None,
+    timeout: float = 45.0,
+    headers: Mapping[str, str] | None = None,
+) -> Any:
+    """GET JSON from ``url`` with SSL fallbacks suitable for vendor APIs."""
+    text = http_get_text(
+        url,
+        params=params,
+        timeout=timeout,
+        headers=headers,
+        accept="application/json",
+    )
+    return json.loads(text)

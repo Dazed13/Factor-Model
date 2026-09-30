@@ -153,9 +153,58 @@ python scripts/download_fundamentals.py --mode snapshot --limit 50
 
 # Explicit tickers
 python scripts/download_fundamentals.py --mode quarterly --symbols RELIANCE,TCS,INFY
+
+# Book equity only from Screener.in (see 4b)
+python scripts/download_fundamentals.py --mode screener-book --symbols RELIANCE,TCS
 ```
 
+### 4b. `download_screener_book.py` — Screener.in book equity
 
+Scrapes consolidated balance-sheet **Equity Capital + Reserves** (₹ crore → INR)
+for 2020–2025 by default. Leaves `market_cap` / `book_to_market` null. HTML is
+cached under `data/raw/fundamentals/screener_cache/`.
+
+```bash
+# Smoke: a few names
+python scripts/download_screener_book.py --symbols RELIANCE,TCS,INFY -v
+
+# Full universe (Nifty 500 snapshot), polite rate limit
+python scripts/download_screener_book.py --start-year 2020 --end-year 2025 --pause 0.75
+
+# Overlay book onto an existing ME panel and rewrite fundamentals
+python scripts/download_screener_book.py \
+  --merge-into data/processed/fundamentals/fundamentals.parquet \
+  --merged-name fundamentals
+```
+
+Outputs: `data/processed/fundamentals/screener_book.parquet` (+ raw CSV).
+
+### 4c. `download_me.py` — Market equity (Bhavcopy × Yahoo shares)
+
+\[
+\mathrm{ME}_{i,t} = \underbrace{\text{Bhavcopy close}_{i,t}}_{\text{unadjusted}}
+\times \underbrace{\text{shares outstanding}_{i,t}}_{\text{Yahoo get\_shares\_full}}
+\]
+
+Attaches ME onto Screener book `as_of_date` rows and rewrites
+`fundamentals.parquet` with `book_to_market` filled. Shares are cached at
+`data/raw/fundamentals/shares_outstanding.parquet`.
+
+```bash
+# Smoke
+python scripts/download_me.py --symbols RELIANCE,TCS,INFY -v
+
+# Full universe (symbols taken from screener_book)
+python scripts/download_me.py --pause 0.15
+
+# Reuse cached shares
+python scripts/download_me.py \
+  --shares-from data/raw/fundamentals/shares_outstanding.parquet
+```
+
+Outputs:
+- `data/processed/fundamentals/market_equity.parquet` (audit: close, shares, ME)
+- `data/processed/fundamentals/fundamentals.parquet` (book + ME + BTM)
 
 ### 5. `download_adjustments.py` — Split / bonus factors
 

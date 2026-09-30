@@ -93,6 +93,28 @@ class TestPortfolio:
         assert_dollar_neutral(w)
         assert abs(float(w["weight"].sum())) < WEIGHT_SUM_TOL
 
+    def test_value_weight_skips_null_market_cap(self) -> None:
+        """Missing ME must not create zero weights in active sleeves."""
+        day = _panel(n_symbols=20, n_days=1)
+        # Null out ME for a few names across the ranking
+        day = day.with_columns(
+            pl.when(pl.col("symbol").is_in(["S00", "S10", "S19"]))
+            .then(None)
+            .otherwise(pl.col("market_cap"))
+            .alias("market_cap")
+        )
+        w = form_quantile_portfolio(
+            day,
+            "illiq_signal",
+            kind="quintile",
+            long_high=True,
+            weighting="value",
+            weight_col="market_cap",
+        )
+        assert_dollar_neutral(w)
+        assert (w["weight"] == 0).sum() == 0
+        assert set(w["symbol"].to_list()).isdisjoint({"S00", "S10", "S19"})
+
     def test_long_low_for_size_style(self) -> None:
         day = _panel(n_symbols=20, n_days=1)
         w = form_quantile_portfolio(

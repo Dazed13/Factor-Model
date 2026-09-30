@@ -27,6 +27,17 @@ from src.data.fundamentals import (
     point_in_time_fundamentals,
     save_fundamentals,
 )
+from src.data.market_equity import (
+    build_market_equity_panel,
+    fetch_shares_history,
+    market_equity_asof,
+    merge_me_into_fundamentals,
+)
+from src.data.screener import (
+    fetch_screener_book_equity,
+    merge_book_into_fundamentals,
+    parse_balance_sheet_table,
+)
 from src.data.paths import ensure_data_dirs
 from src.data.pipeline import PipelineConfig, PipelineResult, run_phase2_pipeline
 from src.data.returns import build_returns_panel, compute_price_returns
@@ -65,6 +76,7 @@ __all__ = [
     "apply_reporting_lag",
     "attach_excess_returns",
     "attach_yfinance_adjustments",
+    "build_market_equity_panel",
     "build_returns_panel",
     "build_risk_free_frame",
     "clean_bhavcopy",
@@ -74,8 +86,14 @@ __all__ = [
     "download_bhavcopy_range",
     "ensure_data_dirs",
     "fetch_nifty500_constituents",
+    "fetch_screener_book_equity",
+    "fetch_shares_history",
     "fetch_yfinance_fundamentals",
     "lag_available_date",
+    "market_equity_asof",
+    "merge_book_into_fundamentals",
+    "merge_me_into_fundamentals",
+    "parse_balance_sheet_table",
     "load_bhavcopy_dir",
     "load_bhavcopy_file",
     "load_fundamentals_csv",

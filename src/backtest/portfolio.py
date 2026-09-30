@@ -29,7 +29,8 @@ WEIGHT_SUM_TOL: float = 1e-10
 
 def _raw_weights(df: pl.DataFrame, weighting: Weighting, weight_col: str | None) -> pl.Expr:
     if weighting == "value" and weight_col and weight_col in df.columns:
-        return pl.col(weight_col).cast(pl.Float64).fill_null(0.0).clip(lower_bound=0.0)
+        # Keep nulls as null — never coerce missing ME to 0 (that creates zero weights).
+        return pl.col(weight_col).cast(pl.Float64)
     return pl.lit(1.0)
 
 
@@ -68,6 +69,14 @@ def build_long_short_weights(
     )
     work = work.filter(pl.col("_is_long") | pl.col("_is_short"))
 
+    # Value-weighting requires strictly positive ME; drop missing/non-positive.
+    if weighting == "value":
+        work = work.filter(
+            pl.col("_raw_w").is_not_null() & (pl.col("_raw_w") > 0)
+        )
+    else:
+        work = work.with_columns(pl.col("_raw_w").fill_null(1.0))
+
     # Sleeve totals per date
     long_tot = (
         work.filter(pl.col("_is_long"))
@@ -90,7 +99,7 @@ def build_long_short_weights(
         .then(-0.5 * pl.col("_raw_w") / pl.col("_short_tot"))
         .otherwise(None)
         .alias("weight")
-    ).filter(pl.col("weight").is_not_null())
+    ).filter(pl.col("weight").is_not_null() & (pl.col("weight") != 0))
 
     return weights.select(
         [

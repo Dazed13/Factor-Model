@@ -71,9 +71,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--fundamentals-mode",
-        choices=["snapshot", "quarterly"],
+        choices=["snapshot", "quarterly", "screener-book"],
         default="snapshot",
-        help="Default snapshot (more reliable). quarterly falls back to snapshot if empty.",
+        help="Default snapshot (more reliable). quarterly falls back to snapshot if empty. "
+        "screener-book fills book equity from Screener.in (ME null).",
     )
     parser.add_argument("--fundamentals-limit", type=int, default=None)
     parser.add_argument("--adjustments-limit", type=int, default=None)

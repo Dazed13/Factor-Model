@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Download fundamentals (market cap / book-to-market) via yfinance.
+"""Download fundamentals (market cap / book-to-market).
 
 Modes
 -----
-* ``snapshot`` — current ``Ticker.info`` (fast; not historical PIT)
-* ``quarterly`` — quarterly balance-sheet book equity + price×shares ME
+* ``snapshot`` — current yfinance ``Ticker.info`` (fast; not historical PIT)
+* ``quarterly`` — yfinance quarterly book equity + price×shares ME
   (falls back to snapshot if quarterly returns nothing)
+* ``screener-book`` — Screener.in Equity Capital + Reserves (book only;
+  ``market_cap`` left null). Prefer ``scripts/download_screener_book.py`` for
+  cache / merge options.
 
 Examples
 --------
     python scripts/download_fundamentals.py --mode snapshot --limit 50
     python scripts/download_fundamentals.py --mode quarterly --limit 100
-    python scripts/download_fundamentals.py --symbols RELIANCE,TCS,INFY --mode quarterly
+    python scripts/download_fundamentals.py --mode screener-book --symbols RELIANCE,TCS
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from src.data.fundamentals import (  # noqa: E402
     save_fundamentals,
 )
 from src.data.paths import RAW_FUNDAMENTALS_DIR, RAW_UNIVERSE_DIR, ensure_data_dirs  # noqa: E402
+from src.data.screener import default_screener_cache_dir, fetch_screener_book_equity  # noqa: E402
 from src.data.universe import fetch_nifty500_constituents, load_universe_snapshots  # noqa: E402
 
 
@@ -49,12 +53,20 @@ def _load_symbols(args: argparse.Namespace) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Download NSE fundamentals via yfinance")
+    parser = argparse.ArgumentParser(description="Download NSE fundamentals")
     parser.add_argument(
         "--mode",
-        choices=["snapshot", "quarterly"],
+        choices=["snapshot", "quarterly", "screener-book"],
         default="quarterly",
-        help="snapshot=current info; quarterly=filing-linked panel (default)",
+        help="snapshot|quarterly (yfinance) or screener-book (Screener.in book equity)",
+    )
+    parser.add_argument("--start-year", type=int, default=2020)
+    parser.add_argument("--end-year", type=int, default=2025)
+    parser.add_argument(
+        "--pause",
+        type=float,
+        default=0.75,
+        help="Pause between Screener page fetches (screener-book mode)",
     )
     parser.add_argument(
         "--symbols",
@@ -110,6 +122,17 @@ def main(argv: list[str] | None = None) -> int:
     used_mode = args.mode
     if args.mode == "snapshot":
         df = fetch_yfinance_fundamentals(symbols, lag_months=args.lag_months)
+    elif args.mode == "screener-book":
+        df = fetch_screener_book_equity(
+            symbols,
+            start_year=args.start_year,
+            end_year=args.end_year,
+            lag_months=args.lag_months,
+            pause_s=args.pause,
+            cache_dir=default_screener_cache_dir(),
+        )
+        if args.name == "fundamentals":
+            args.name = "screener_book"
     else:
         df = fetch_yfinance_quarterly_fundamentals(
             symbols, lag_months=args.lag_months, max_symbols=None
@@ -122,10 +145,10 @@ def main(argv: list[str] | None = None) -> int:
             used_mode = "snapshot (fallback)"
 
     if df.is_empty():
-        print("No fundamentals rows returned — check network / tickers / Yahoo SSL.")
+        print("No fundamentals rows returned — check network / tickers / source.")
         print(
-            "Tip: retry with --mode snapshot, or continue the pipeline with "
-            "--skip-fundamentals (Amihud/WML still work)."
+            "Tip: retry with --mode snapshot or --mode screener-book, or continue "
+            "with --skip-fundamentals (Amihud/WML still work)."
         )
         return 0 if args.allow_empty else 1
 
@@ -134,10 +157,16 @@ def main(argv: list[str] | None = None) -> int:
     df.write_csv(csv_path)
     print(f"Saved {df.height} rows via {used_mode} → {parquet}")
     print(f"Also wrote {csv_path}")
-    print(
-        "Caveat: yfinance sharesOutstanding is often point-in-time current; "
-        "prefer a vendor fundamentals feed for production SMB/HML research."
-    )
+    if args.mode == "screener-book":
+        print(
+            "Screener book side only — market_cap/book_to_market are null. "
+            "Use scripts/download_screener_book.py --merge-into to overlay onto ME."
+        )
+    else:
+        print(
+            "Caveat: yfinance sharesOutstanding is often point-in-time current; "
+            "prefer a vendor fundamentals feed for production SMB/HML research."
+        )
     return 0
 
 
